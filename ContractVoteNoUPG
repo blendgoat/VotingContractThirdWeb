@@ -1,0 +1,267 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.11;
+
+// Base
+import "@thirdweb-dev/contracts/vote/VoteERC20.sol";
+import "@thirdweb-dev/contracts/interfaces/IThirdwebContract.sol";
+
+// Governance
+import "@openzeppelin/contracts/governance/Governor.sol";
+import "@openzeppelin/contracts/governance/utils/IVotes.sol";
+import "@openzeppelin/contracts/governance/extensions/GovernorSettings.sol";
+import "@openzeppelin/contracts/governance/extensions/GovernorCountingSimple.sol";
+import "@openzeppelin/contracts/governance/extensions/GovernorVotes.sol";
+import "@openzeppelin/contracts/governance/extensions/GovernorVotesQuorumFraction.sol";
+
+
+
+// Meta transactions
+import "@openzeppelin/contracts/metatx/ERC2771Context.sol";
+
+
+interface ERC1155 {
+    function balanceOf(address owner) external view returns(uint);
+
+    function tokenOfOwnerByIndex(address owner, uint256 index) external view returns(uint256);
+}
+
+
+contract BullionDaoTing is
+    IThirdwebContract,
+    ERC2771Context,
+    Governor,
+    GovernorSettings,
+    GovernorCountingSimple,
+    GovernorVotes,
+    GovernorVotesQuorumFraction {
+    
+    
+    
+    address public owner;
+    ERC1155 public immutable membershipNFT;
+    uint256 public tokenId;
+
+
+    bytes32 private constant MODULE_TYPE = bytes32("VoteERC20");
+    uint256 private constant VERSION = 1;
+
+    mapping(uint256 => Proposal) public proposals;
+    uint256 public proposalIndex;
+    string public contractURI;
+    
+      struct Proposal {
+        uint256 proposalId;
+        address proposer;
+        address[] targets;
+        uint256[] values;
+        string[] signatures;
+        bytes[] calldatas;
+        uint256 startBlock;
+        uint256 endBlock;
+        string description;
+    }   
+        
+   
+
+
+    constructor( 
+        uint256 _tokenId,   
+        address _serumAddress,
+        string memory _contractURI,
+        address[] memory _trustedForwarders,
+        string memory _name,
+        uint256 _initialVotingDelay,
+        uint256 _initialVotingPeriod,
+        uint256 _initialProposalThreshold,
+        address _token,
+        uint256 _initialVoteQuorumFraction
+    ) 
+        ERC2771Context( _trustedForwarders) Governor(_name) GovernorSettings(_initialVotingDelay, _initialVotingPeriod, _initialProposalThreshold) GovernorVotes(IVotes(_token)) GovernorVotesQuorumFraction(_initialVoteQuorumFraction) {
+         membershipNFT = ERC1155(_serumAddress);
+         tokenId = _tokenId;
+         contractURI = _contractURI;
+    }
+
+
+    function contractType() external pure returns (bytes32) {
+        return MODULE_TYPE;
+    }
+
+    /// @dev Returns the version of the contract.
+    function contractVersion() public pure override returns (uint8) {
+        return uint8(VERSION);
+    }
+
+
+     modifier nftHolderOnly {
+        require(membershipNFT.balanceOf(msg.sender) > 0, "You need to own an ERC1155 token before you perform x ");
+        _;
+    }
+
+    modifier onlyowner() {
+      require(msg.sender == owner);
+      
+      _;
+    }
+
+
+    
+
+
+
+    function propose(
+        address[] memory targets,
+        uint256[] memory values,
+        bytes[] memory calldatas,
+        string memory description
+    ) public virtual override(Governor) nftHolderOnly  returns (uint256 proposalId) {
+        proposalId = super.propose(targets, values, calldatas, description);
+
+        proposals[proposalIndex] = Proposal({
+            proposalId: proposalId,
+            proposer: _msgSender(),
+            targets: targets,
+            values: values,
+            signatures: new string[](targets.length),
+            calldatas: calldatas,
+            startBlock: proposalSnapshot(proposalId),
+            endBlock: proposalDeadline(proposalId),
+            description: description
+        });
+
+        proposalIndex += 1;
+    }
+
+
+    function getAllProposals() external view returns (Proposal[] memory allProposals) {
+        uint256 nextProposalIndex = proposalIndex;
+
+        allProposals = new Proposal[](nextProposalIndex);
+        for (uint256 i = 0; i < nextProposalIndex; i += 1) {
+            allProposals[i] = proposals[i];
+        }
+    }
+
+    function setContractURI(string calldata uri) external onlyowner {
+        contractURI = uri;
+    }
+
+    function castVote(uint256 proposalId, uint8 support) public virtual override nftHolderOnly returns (uint256) {
+        address voter = _msgSender();
+        return _castVote(proposalId, voter, support, "");
+    }
+
+    /**
+     * @dev See {IGovernor-castVoteWithReason}.
+     */
+    function castVoteWithReason(
+        uint256 proposalId,
+        uint8 support,
+        string calldata reason
+    ) public virtual override nftHolderOnly returns (uint256) {
+        address voter = _msgSender();
+        return _castVote(proposalId, voter, support, reason);
+    }
+
+    /**
+     * @dev See {IGovernor-castVoteWithReasonAndParams}.
+     */
+    function castVoteWithReasonAndParams(
+        uint256 proposalId,
+        uint8 support,
+        string calldata reason,
+        bytes memory params
+    ) public virtual override nftHolderOnly returns (uint256) {
+        address voter = _msgSender();
+        return _castVote(proposalId, voter, support, reason, params);
+    }
+
+    /**
+     * @dev See {IGovernor-castVoteBySig}.
+     */
+    function castVoteBySig(
+        uint256 proposalId,
+        uint8 support,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) public virtual override nftHolderOnly returns (uint256) {
+        address voter = ECDSA.recover(
+            _hashTypedDataV4(keccak256(abi.encode(BALLOT_TYPEHASH, proposalId, support))),
+            v,
+            r,
+            s
+        );
+        return _castVote(proposalId, voter, support, "");
+    }
+
+    /**
+     * @dev See {IGovernor-castVoteWithReasonAndParamsBySig}.
+     */
+    function castVoteWithReasonAndParamsBySig(
+        uint256 proposalId,
+        uint8 support,
+        string calldata reason,
+        bytes memory params,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) public virtual override nftHolderOnly returns (uint256) {
+        address voter = ECDSA.recover(
+            _hashTypedDataV4(
+                keccak256(
+                    abi.encode(
+                        EXTENDED_BALLOT_TYPEHASH,
+                        proposalId,
+                        support,
+                        keccak256(bytes(reason)),
+                        keccak256(params)
+                    )
+                )
+            ),
+            v,
+            r,
+            s
+        );
+
+        return _castVote(proposalId, voter, support, reason, params);
+    }
+
+
+    function proposalThreshold()
+        public
+        view
+        override(Governor, GovernorSettings)
+        returns (uint256)
+    {
+        return GovernorSettings.proposalThreshold();
+    }
+
+    function supportsInterface(bytes4 interfaceId) public view override returns (bool) {
+        return interfaceId == type(IERC721Receiver).interfaceId || super.supportsInterface(interfaceId);
+    }
+
+    function _msgSender()
+        internal
+        view
+        virtual
+        override(Context, ERC2771Context)
+        returns (address sender)
+    {
+        return ERC2771Context._msgSender();
+    }
+
+    function _msgData()
+        internal
+        view
+        virtual
+        override(Context, ERC2771Context)
+        returns (bytes calldata)
+    {
+        return ERC2771Context._msgData();
+        
+    }
+
+    
+
+}
